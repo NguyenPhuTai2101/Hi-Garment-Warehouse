@@ -3,36 +3,39 @@ import { pool } from '../db'
 
 export const ordersRouter = Router()
 
-// GET /api/orders - Lấy danh sách phiếu giám định kèm chi tiết phụ liệu
+// GET /api/orders - Lấy danh sách phiếu giám định theo chuẩn production eGMF
 ordersRouter.get('/', async (_req: Request, res: Response) => {
   try {
     const ordersResult = await pool.query(`
       SELECT 
-        order_id AS "orderId",
-        style_code AS "styleCode",
-        po_number AS "poNumber",
-        vendor_name AS "vendor",
-        status,
-        TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI') AS "createdDate"
-      FROM inspection_orders
-      ORDER BY created_at DESC
+        p.PGDId AS "orderId",
+        p.MaPhieu AS "orderCode",
+        p.MaHang AS "styleCode",
+        p.DanhSachPO AS "poNumber",
+        COALESCE(kh.TenDayDu, kh.TenNgan, 'N/A') AS "vendor",
+        p.TrangThai AS "status",
+        TO_CHAR(p.NgayGiamDinh, 'YYYY-MM-DD HH24:MI') AS "createdDate"
+      FROM WH_PhieuGiamDinh p
+      LEFT JOIN Lib_KhachHang kh ON p.KHId = kh.KHId
+      ORDER BY p.NgayGiamDinh DESC
     `)
 
     const detailsResult = await pool.query(`
       SELECT 
-        detail_id AS "id",
-        order_id AS "orderId",
-        item_code AS "itemCode",
-        item_name AS "itemName",
-        unit,
-        planned_qty::float AS "plannedQty",
-        received_qty::float AS "receivedQty"
-      FROM inspection_order_details
-      ORDER BY detail_id ASC
+        ct.CTPGDId AS "id",
+        ct.PGDId AS "orderId",
+        npl.Item AS "itemCode",
+        npl.DienGiai AS "itemName",
+        npl.DVT AS "unit",
+        ct.SLKiem::float AS "plannedQty",
+        (SELECT COUNT(*)::float FROM WH_ChiTietPhieuGiamDinh_Cay WHERE CTPGDId = ct.CTPGDId) AS "receivedQty"
+      FROM WH_ChiTietPhieuGiamDinh ct
+      JOIN Lib_NguyenPhuLieu npl ON ct.VTId = npl.VTId
+      ORDER BY ct.CTPGDId ASC
     `)
 
     const orders = ordersResult.rows.map((order: any) => {
-      const items = detailsResult.rows.filter((d: any) => d.orderId === order.orderId)
+      const items = detailsResult.rows.filter((d: any) => String(d.orderId) === String(order.orderId))
       return {
         ...order,
         items
@@ -52,33 +55,38 @@ ordersRouter.get('/:id', async (req: Request, res: Response) => {
     const { id } = req.params
     const orderResult = await pool.query(`
       SELECT 
-        order_id AS "orderId",
-        style_code AS "styleCode",
-        po_number AS "poNumber",
-        vendor_name AS "vendor",
-        status,
-        TO_CHAR(created_at, 'YYYY-MM-DD HH24:MI') AS "createdDate"
-      FROM inspection_orders
-      WHERE order_id = $1
+        p.PGDId AS "orderId",
+        p.MaPhieu AS "orderCode",
+        p.MaHang AS "styleCode",
+        p.DanhSachPO AS "poNumber",
+        COALESCE(kh.TenDayDu, kh.TenNgan, 'N/A') AS "vendor",
+        p.TrangThai AS "status",
+        TO_CHAR(p.NgayGiamDinh, 'YYYY-MM-DD HH24:MI') AS "createdDate"
+      FROM WH_PhieuGiamDinh p
+      LEFT JOIN Lib_KhachHang kh ON p.KHId = kh.KHId
+      WHERE p.PGDId::text = $1 OR p.MaPhieu = $1
     `, [id])
 
     if (orderResult.rows.length === 0) {
       return res.status(404).json({ success: false, message: 'Không tìm thấy phiếu giám định' })
     }
 
+    const pgdId = orderResult.rows[0].orderId
+
     const itemsResult = await pool.query(`
       SELECT 
-        detail_id AS "id",
-        order_id AS "orderId",
-        item_code AS "itemCode",
-        item_name AS "itemName",
-        unit,
-        planned_qty::float AS "plannedQty",
-        received_qty::float AS "receivedQty"
-      FROM inspection_order_details
-      WHERE order_id = $1
-      ORDER BY detail_id ASC
-    `, [id])
+        ct.CTPGDId AS "id",
+        ct.PGDId AS "orderId",
+        npl.Item AS "itemCode",
+        npl.DienGiai AS "itemName",
+        npl.DVT AS "unit",
+        ct.SLKiem::float AS "plannedQty",
+        (SELECT COUNT(*)::float FROM WH_ChiTietPhieuGiamDinh_Cay WHERE CTPGDId = ct.CTPGDId) AS "receivedQty"
+      FROM WH_ChiTietPhieuGiamDinh ct
+      JOIN Lib_NguyenPhuLieu npl ON ct.VTId = npl.VTId
+      WHERE ct.PGDId = $1
+      ORDER BY ct.CTPGDId ASC
+    `, [pgdId])
 
     res.json({
       success: true,

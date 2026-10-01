@@ -3,27 +3,29 @@ import { pool } from '../db'
 
 export const putawayRouter = Router()
 
-// GET /api/locations - Danh sách vị trí kệ
+// GET /api/putaway/locations - Danh sách vị trí kệ kho (Lib_ViTriKho)
 putawayRouter.get('/locations', async (_req: Request, res: Response) => {
   try {
     const result = await pool.query(`
       SELECT 
-        location_id AS "locationId",
-        zone,
-        rack,
-        bin,
-        description
-      FROM locations
-      WHERE is_active = TRUE
-      ORDER BY location_id ASC
+        v.VTId AS "vtId",
+        v.TenViTri AS "locationId",
+        COALESCE(k.TenKho, 'Kho BGG') AS "zone",
+        v.TenViTri AS "rack",
+        'Tầng 1' AS "bin",
+        COALESCE(v.MoTa, 'Vị trí kệ tiêu chuẩn') AS "description"
+      FROM Lib_ViTriKho v
+      LEFT JOIN Lib_DanhSachKho k ON v.KId = k.KId
+      ORDER BY v.TenViTri ASC
     `)
     res.json({ success: true, data: result.rows })
   } catch (err: any) {
+    console.error('Error fetching locations:', err)
     res.status(500).json({ success: false, message: err.message })
   }
 })
 
-// POST /api/putaway/carton - Cất nguyên thùng (Thừa kế vị trí cho item con)
+// POST /api/putaway/carton - Cất nguyên thùng/rọ lên kệ (Lib_RO -> Lib_ViTriKho)
 putawayRouter.post('/carton', async (req: Request, res: Response) => {
   const client = await pool.connect()
   try {
@@ -37,60 +39,75 @@ putawayRouter.post('/carton', async (req: Request, res: Response) => {
 
     await client.query('BEGIN')
 
-    // 1. Kiểm tra tồn tại thùng
-    const cartonRes = await client.query(`SELECT * FROM cartons WHERE carton_id = $1 FOR UPDATE`, [cleanCartonId])
+    // 1. Kiểm tra tồn tại rọ
+    const cartonRes = await client.query(`SELECT * FROM Lib_RO WHERE MaRo = $1 FOR UPDATE`, [cleanCartonId])
     if (cartonRes.rows.length === 0) {
       await client.query('ROLLBACK')
-      return res.status(404).json({ success: false, message: `Thùng ${cleanCartonId} không tồn tại` })
+      return res.status(404).json({ success: false, message: `Thùng/Rọ ${cleanCartonId} không tồn tại` })
     }
 
-    // 2. Đảm bảo location tồn tại trong bảng locations
-    await client.query(`
-      INSERT INTO locations (location_id, zone, rack, bin, description)
-      VALUES ($1, 'Khu Chờ', $1, 'Tầng 1', 'Vị trí kệ tạo nhanh')
-      ON CONFLICT (location_id) DO NOTHING
-    `, [cleanLocationId])
+    // 2. Đảm bảo vị trí tồn tại trong Lib_ViTriKho và lấy VTId
+    let locRes = await client.query(`SELECT VTId FROM Lib_ViTriKho WHERE TenViTri = $1`, [cleanLocationId])
+    let vtId: number
+    if (locRes.rows.length === 0) {
+      const maxIdRes = await client.query(`SELECT COALESCE(MAX(VTId), 0) + 1 AS next_id FROM Lib_ViTriKho`)
+      vtId = parseInt(maxIdRes.rows[0].next_id, 10)
+      await client.query(`
+        INSERT INTO Lib_ViTriKho (VTId, TenViTri, KId, MoTa)
+        VALUES ($1, $2, 1, 'Vị trí kệ tạo nhanh')
+        ON CONFLICT (TenViTri) DO NOTHING
+      `, [vtId, cleanLocationId])
+    } else {
+      vtId = locRes.rows[0].vtid
+    }
 
-    // 3. Cập nhật vị trí kệ cho thùng
+    // 3. Cập nhật vị trí kệ cho rọ (Theo chuẩn proc lib_NPL_CapNhatViTri_New)
     await client.query(`
-      UPDATE cartons 
-      SET location_id = $1, status = 'STORED', stored_at = CURRENT_TIMESTAMP
-      WHERE carton_id = $2
-    `, [cleanLocationId, cleanCartonId])
+      UPDATE Lib_RO 
+      SET 
+        TenViTri = $1,
+        VTId = $2,
+        TrangThaiRo = 'STORED',
+        NgayCapNhatViTri = CURRENT_TIMESTAMP,
+        NguoiCapNhatViTri = 'PDA_USER'
+      WHERE MaRo = $3
+    `, [cleanLocationId, vtId, cleanCartonId])
 
-    // 4. Thừa kế vị trí: cập nhật toàn bộ item con trong thùng
-    const updateItemsRes = await client.query(`
-      UPDATE carton_items 
-      SET location_id = $1 
-      WHERE carton_id = $2
-    `, [cleanLocationId, cleanCartonId])
+    // 4. Đếm số lượng tem phụ liệu trong thùng thừa kế vị trí này
+    const itemsCountRes = await client.query(`
+      SELECT COUNT(*)::int AS count 
+      FROM WH_ChiTietPhieuGiamDinh_Cay 
+      WHERE MaRo = $1
+    `, [cleanCartonId])
+    const itemCount = itemsCountRes.rows[0].count
 
-    // 5. Ghi log
+    // 5. Ghi log hệ thống Sys_Log
     await client.query(`
-      INSERT INTO scan_audit_logs (barcode, scan_action, status, message)
-      VALUES ($1, 'PUTAWAY_CARTON', 'SUCCESS', $2)
-    `, [cleanCartonId, `Cất thùng lên kệ ${cleanLocationId} (${updateItemsRes.rowCount} item thừa kế)`])
+      INSERT INTO Sys_Log (TypeLog, ContentLog, UserName)
+      VALUES ($1, $2, 'PDA_USER')
+    `, ['PUTAWAY_CARTON', `Cất thùng ${cleanCartonId} lên kệ ${cleanLocationId} (${itemCount} phụ liệu thừa kế vị trí)`])
 
     await client.query('COMMIT')
 
     res.json({
       success: true,
-      message: `Đã cất thùng ${cleanCartonId} lên kệ ${cleanLocationId} (${updateItemsRes.rowCount} phụ liệu thừa kế vị trí)`,
+      message: `Đã cất thùng ${cleanCartonId} lên kệ ${cleanLocationId} (${itemCount} phụ liệu thừa kế vị trí)`,
       data: {
         cartonId: cleanCartonId,
         locationId: cleanLocationId,
-        updatedItemsCount: updateItemsRes.rowCount
+        updatedItemsCount: itemCount
       }
     })
   } catch (err: any) {
     await client.query('ROLLBACK')
+    console.error('Putaway carton error:', err)
     res.status(500).json({ success: false, message: err.message })
   } finally {
     client.release()
   }
 })
 
-// POST /api/putaway/item - Cất lẻ từng gói phụ liệu (Pick to Bin)
+// POST /api/putaway/item - Cất lẻ từng gói phụ liệu (Pick to Bin / Rời rọ)
 putawayRouter.post('/item', async (req: Request, res: Response) => {
   const client = await pool.connect()
   try {
@@ -104,39 +121,75 @@ putawayRouter.post('/item', async (req: Request, res: Response) => {
 
     await client.query('BEGIN')
 
-    const itemRes = await client.query(`SELECT * FROM carton_items WHERE child_barcode = $1 FOR UPDATE`, [cleanBarcode])
+    const itemRes = await client.query(`
+      SELECT * FROM WH_ChiTietPhieuGiamDinh_Cay 
+      WHERE MaCay = $1 FOR UPDATE
+    `, [cleanBarcode])
+
     if (itemRes.rows.length === 0) {
       await client.query('ROLLBACK')
       return res.status(404).json({ success: false, message: `Không tìm thấy tem phụ liệu ${cleanBarcode}` })
     }
 
     const oldItem = itemRes.rows[0]
+    const oldMaRo = oldItem.maro
 
-    // Đảm bảo location tồn tại
-    await client.query(`
-      INSERT INTO locations (location_id, zone, rack, bin, description)
-      VALUES ($1, 'Khu Chờ', $1, 'Tầng 1', 'Vị trí kệ tạo nhanh')
-      ON CONFLICT (location_id) DO NOTHING
-    `, [cleanLocationId])
+    // Đảm bảo vị trí tồn tại trong Lib_ViTriKho
+    let locRes = await client.query(`SELECT VTId FROM Lib_ViTriKho WHERE TenViTri = $1`, [cleanLocationId])
+    if (locRes.rows.length === 0) {
+      const maxIdRes = await client.query(`SELECT COALESCE(MAX(VTId), 0) + 1 AS next_id FROM Lib_ViTriKho`)
+      const nextId = parseInt(maxIdRes.rows[0].next_id, 10)
+      await client.query(`
+        INSERT INTO Lib_ViTriKho (VTId, TenViTri, KId, MoTa)
+        VALUES ($1, $2, 1, 'Vị trí kệ tạo nhanh')
+        ON CONFLICT (TenViTri) DO NOTHING
+      `, [nextId, cleanLocationId])
+    }
 
-    // Cập nhật vị trí riêng cho item
+    // Cập nhật rời rọ cho cây phụ liệu (MaRo = NULL)
     await client.query(`
-      UPDATE carton_items 
-      SET location_id = $1 
-      WHERE child_barcode = $2
-    `, [cleanLocationId, cleanBarcode])
+      UPDATE WH_ChiTietPhieuGiamDinh_Cay 
+      SET MaRo = NULL, NgayCapNhatRo = CURRENT_TIMESTAMP, NguoiCapNhatRo = 'PDA_USER'
+      WHERE MaCay = $1
+    `, [cleanBarcode])
 
-    // Ghi log
+    // Xử lý rọ cũ theo proc lib_NPL_CapNhatViTri_New:
+    // Nếu rọ cũ không còn cây nào có tồn (SL - SoLuongXuat > 0), set vị trí = null
+    if (oldMaRo) {
+      const remainingRes = await client.query(`
+        SELECT COUNT(*)::int AS count 
+        FROM WH_ChiTietPhieuGiamDinh_Cay 
+        WHERE MaRo = $1 AND (SL - COALESCE(SoLuongXuat, 0) > 0)
+      `, [oldMaRo])
+      
+      const remainingCount = remainingRes.rows[0].count
+
+      if (remainingCount === 0) {
+        await client.query(`
+          UPDATE Lib_RO 
+          SET TenViTri = NULL, VTId = NULL, TrangThaiRo = 'EMPTY', TongSoCay = 0 
+          WHERE MaRo = $1
+        `, [oldMaRo])
+      } else {
+        await client.query(`
+          UPDATE Lib_RO 
+          SET TongSoCay = $1 
+          WHERE MaRo = $2
+        `, [remainingCount, oldMaRo])
+      }
+    }
+
+    // Ghi log hệ thống Sys_Log
     await client.query(`
-      INSERT INTO scan_audit_logs (barcode, scan_action, status, message)
-      VALUES ($1, 'PUTAWAY_ITEM', 'SUCCESS', $2)
-    `, [cleanBarcode, `Cất lẻ phụ liệu lên kệ ${cleanLocationId} (Rời thùng ${oldItem.carton_id || 'N/A'})`])
+      INSERT INTO Sys_Log (TypeLog, ContentLog, UserName)
+      VALUES ($1, $2, 'PDA_USER')
+    `, ['PUTAWAY_ITEM', `Cất lẻ phụ liệu ${cleanBarcode} lên kệ ${cleanLocationId} (Rời rọ ${oldMaRo || 'N/A'})`])
 
     await client.query('COMMIT')
 
     res.json({
       success: true,
-      message: `Đã cất lẻ phụ liệu ${cleanBarcode} vào kệ ${cleanLocationId}`,
+      message: `Đã cất lẻ phụ liệu ${cleanBarcode} vào kệ ${cleanLocationId} (Rời rọ ${oldMaRo || 'N/A'})`,
       data: {
         childBarcode: cleanBarcode,
         locationId: cleanLocationId
@@ -144,6 +197,7 @@ putawayRouter.post('/item', async (req: Request, res: Response) => {
     })
   } catch (err: any) {
     await client.query('ROLLBACK')
+    console.error('Putaway item error:', err)
     res.status(500).json({ success: false, message: err.message })
   } finally {
     client.release()

@@ -1,158 +1,207 @@
 -- ==============================================================================
--- DATABASE SCHEMA: HỆ THỐNG QUẢN LÝ KHO PHỤ LIỆU MAY MẶC (WMS)
--- MODULE: KIỂM ĐỊNH & ĐỊNH DANH THÙNG HỖN HỢP (MIXED CARTON)
--- HỆ CSDL: PostgreSQL 18
--- DATABASE: Hi-Garment-warehouse
+-- DATABASE SCHEMA: HỆ THỐNG KHO PHỤ LIỆU MAY MẶC BGG (MÔ PHỎNG CHUẨN PRODUCTION eGMF)
+-- ĐỒNG BỘ CẤU TRÚC VỚI 3 STORED PROCEDURE:
+-- 1. [wh_DanhSachPhieuGiamDinhTheoThoiGian]
+-- 2. [WH_ChiTietPhieuGiamDinh_PGDId]
+-- 3. [lib_NPL_CapNhatViTri_New]
 -- ==============================================================================
 
--- Bật extension uuid nếu cần
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+-- Xóa các bảng cũ nếu cần thiết kế lại đồng bộ
+DROP TABLE IF EXISTS scan_audit_logs CASCADE;
+DROP TABLE IF EXISTS WH_ChiTietPhieuGiamDinh_Cay CASCADE;
+DROP TABLE IF EXISTS WH_ChiTietPhieuGiamDinh CASCADE;
+DROP TABLE IF EXISTS WH_PhieuGiamDinh CASCADE;
+DROP TABLE IF EXISTS Lib_NguyenPhuLieu CASCADE;
+DROP TABLE IF EXISTS Lib_RO CASCADE;
+DROP TABLE IF EXISTS Lib_ViTriKho CASCADE;
+DROP TABLE IF EXISTS Lib_DanhSachKho CASCADE;
+DROP TABLE IF EXISTS Lib_KhachHang CASCADE;
+DROP TABLE IF EXISTS carton_items CASCADE;
+DROP TABLE IF EXISTS cartons CASCADE;
+DROP TABLE IF EXISTS inspection_order_details CASCADE;
+DROP TABLE IF EXISTS inspection_orders CASCADE;
+DROP TABLE IF EXISTS locations CASCADE;
 
--- 1. BẢNG VỊ TRÍ KHO (LOCATIONS)
-CREATE TABLE IF NOT EXISTS locations (
-    location_id VARCHAR(50) PRIMARY KEY,
-    zone VARCHAR(50) NOT NULL,
-    rack VARCHAR(50) NOT NULL,
-    bin VARCHAR(50) DEFAULT 'Tầng 1',
-    description TEXT,
-    is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+-- 1. DANH MỤC KHO (Lib_DanhSachKho)
+CREATE TABLE Lib_DanhSachKho (
+    KId INT PRIMARY KEY,
+    MaKho VARCHAR(50) NOT NULL UNIQUE,
+    TenKho VARCHAR(255) NOT NULL
 );
 
-COMMENT ON TABLE locations IS 'Bảng danh mục vị trí lưu kho kệ, tầng, ô (Rack / Bin)';
-
--- 2. BẢNG PHIẾU GIÁM ĐỊNH (INSPECTION ORDERS - THEO MÃ HÀNG)
-CREATE TABLE IF NOT EXISTS inspection_orders (
-    order_id VARCHAR(50) PRIMARY KEY,
-    style_code VARCHAR(100) NOT NULL,
-    po_number VARCHAR(50),
-    vendor_name VARCHAR(200) NOT NULL,
-    status VARCHAR(30) DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED')),
-    note TEXT,
-    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+-- 2. DANH MỤC KHÁCH HÀNG / NHÀ CUNG CẤP (Lib_KhachHang)
+CREATE TABLE Lib_KhachHang (
+    KHId BIGINT PRIMARY KEY,
+    MaKhachHang VARCHAR(50) NOT NULL UNIQUE,
+    TenDayDu VARCHAR(255) NOT NULL,
+    TenNgan VARCHAR(100)
 );
 
-COMMENT ON TABLE inspection_orders IS 'Phiếu giám định kiểm nhận theo từng mã hàng may mặc (1 Phiếu = 1 Mã hàng)';
-
--- 3. BẢNG CHI TIẾT PHIẾU GIÁM ĐỊNH (INSPECTION ORDER DETAILS)
-CREATE TABLE IF NOT EXISTS inspection_order_details (
-    detail_id BIGSERIAL PRIMARY KEY,
-    order_id VARCHAR(50) NOT NULL REFERENCES inspection_orders(order_id) ON DELETE CASCADE ON UPDATE CASCADE,
-    item_code VARCHAR(100) NOT NULL,
-    item_name VARCHAR(255) NOT NULL,
-    unit VARCHAR(50) NOT NULL,
-    planned_qty NUMERIC(12, 2) NOT NULL DEFAULT 0,
-    received_qty NUMERIC(12, 2) NOT NULL DEFAULT 0,
-    tolerance_percent NUMERIC(5, 2) DEFAULT 0.00,
-    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT chk_received_qty CHECK (received_qty >= 0)
+-- 3. DANH MỤC VỊ TRÍ KHO KỆ (Lib_ViTriKho)
+CREATE TABLE Lib_ViTriKho (
+    VTId BIGINT PRIMARY KEY,
+    TenViTri VARCHAR(50) NOT NULL UNIQUE,
+    KId INT REFERENCES Lib_DanhSachKho(KId),
+    MoTa TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_order_details_item ON inspection_order_details(item_code);
-CREATE INDEX IF NOT EXISTS idx_order_details_order ON inspection_order_details(order_id);
-
-COMMENT ON TABLE inspection_order_details IS 'Danh sách các mã phụ liệu cần kiểm nhận trong phiếu giám định';
-
--- 4. BẢNG THÙNG CHA (CARTONS - PARENT BARCODE / LPN)
-CREATE TABLE IF NOT EXISTS cartons (
-    carton_id VARCHAR(50) PRIMARY KEY,
-    location_id VARCHAR(50) REFERENCES locations(location_id) ON DELETE SET NULL ON UPDATE CASCADE,
-    status VARCHAR(30) DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'CLOSED', 'STORED', 'EMPTY', 'SCRAPPED')),
-    total_items_count INT DEFAULT 0,
-    note TEXT,
-    created_by VARCHAR(100) DEFAULT 'SYSTEM',
-    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    closed_at TIMESTAMPTZ,
-    stored_at TIMESTAMPTZ
+-- 4. DANH MỤC NGUYÊN PHỤ LIỆU (Lib_NguyenPhuLieu)
+CREATE TABLE Lib_NguyenPhuLieu (
+    VTId BIGINT PRIMARY KEY,
+    Item VARCHAR(100) NOT NULL, -- ItemCode (CHI-DEN-40, KHOA-DONG...)
+    DienGiai VARCHAR(255) NOT NULL, -- Tên chủng loại NPL
+    MaChungLoai VARCHAR(50),
+    DVT VARCHAR(50) NOT NULL, -- Cuộn, Bịch, Cái, Mét...
+    Size VARCHAR(50),
+    MaMau VARCHAR(50),
+    LoaiNPL VARCHAR(50) DEFAULT 'PhuLieu',
+    DHId BIGINT -- Mã đơn hàng liên quan
 );
 
-CREATE INDEX IF NOT EXISTS idx_cartons_status ON cartons(status);
-CREATE INDEX IF NOT EXISTS idx_cartons_location ON cartons(location_id);
-
-COMMENT ON TABLE cartons IS 'Bảng định danh vỏ thùng vật lý (Parent Carton ID / LPN)';
-
--- 5. BẢNG TEM PHỤ LIỆU CON (CARTON ITEMS - CHILD BARCODE)
-CREATE TABLE IF NOT EXISTS carton_items (
-    item_id BIGSERIAL PRIMARY KEY,
-    child_barcode VARCHAR(100) UNIQUE NOT NULL,
-    carton_id VARCHAR(50) REFERENCES cartons(carton_id) ON DELETE SET NULL ON UPDATE CASCADE,
-    order_id VARCHAR(50) REFERENCES inspection_orders(order_id) ON UPDATE CASCADE,
-    detail_id BIGINT REFERENCES inspection_order_details(detail_id) ON DELETE SET NULL,
-    style_code VARCHAR(100) NOT NULL,
-    item_code VARCHAR(100) NOT NULL,
-    item_name VARCHAR(255) NOT NULL,
-    qty NUMERIC(12, 2) NOT NULL DEFAULT 1.00,
-    unit VARCHAR(50) NOT NULL,
-    location_id VARCHAR(50) REFERENCES locations(location_id) ON DELETE SET NULL ON UPDATE CASCADE,
-    quality_status VARCHAR(30) DEFAULT 'PASS' CHECK (quality_status IN ('PASS', 'FAIL', 'HOLD')),
-    lot_number VARCHAR(100),
-    scanned_by VARCHAR(100) DEFAULT 'PDA_USER',
-    scanned_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+-- 5. DANH MỤC RỌ / THÙNG CARTON (Lib_RO)
+-- Đại diện cho Vỏ Thùng Carton (Carton ID) trong mô hình Parent-Child
+CREATE TABLE Lib_RO (
+    MaRo VARCHAR(50) PRIMARY KEY, -- Mã Thùng / Rọ (VD: TH-00101, NA-00001)
+    VTId BIGINT REFERENCES Lib_ViTriKho(VTId), -- Vị trí kệ lưu trữ Rọ
+    TenViTri VARCHAR(50), -- Tên vị trí kệ hiển thị
+    KId INT REFERENCES Lib_DanhSachKho(KId),
+    TrangThaiRo VARCHAR(30) DEFAULT 'OPEN' CHECK (TrangThaiRo IN ('OPEN', 'CLOSED', 'STORED', 'EMPTY')),
+    TongSoCay INT DEFAULT 0, -- Số lượng gói/cuộn phụ liệu trong rọ
+    NguoiCapNhatViTri VARCHAR(100),
+    NgayCapNhatViTri TIMESTAMPTZ,
+    NgayTao TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    NgayDongThung TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_carton_items_barcode ON carton_items(child_barcode);
-CREATE INDEX IF NOT EXISTS idx_carton_items_carton ON carton_items(carton_id);
-CREATE INDEX IF NOT EXISTS idx_carton_items_location ON carton_items(location_id);
-CREATE INDEX IF NOT EXISTS idx_carton_items_itemcode ON carton_items(item_code);
-
-COMMENT ON TABLE carton_items IS 'Mã tem barcode phụ liệu duy nhất dán trên từng cuộn/bịch (Child Barcode)';
-
--- 6. BẢNG NHẬT KÝ QUÉT BARCODE (SCAN AUDIT LOGS)
-CREATE TABLE IF NOT EXISTS scan_audit_logs (
-    log_id BIGSERIAL PRIMARY KEY,
-    barcode VARCHAR(100) NOT NULL,
-    scan_action VARCHAR(50) NOT NULL,
-    status VARCHAR(20) NOT NULL,
-    message TEXT,
-    device_info TEXT,
-    scanned_by VARCHAR(100) DEFAULT 'PDA_USER',
-    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+-- 6. PHIẾU GIÁM ĐỊNH (WH_PhieuGiamDinh)
+CREATE TABLE WH_PhieuGiamDinh (
+    PGDId BIGINT PRIMARY KEY,
+    MaPhieu VARCHAR(50) NOT NULL UNIQUE,
+    KHId BIGINT REFERENCES Lib_KhachHang(KHId),
+    KId INT REFERENCES Lib_DanhSachKho(KId),
+    VTId BIGINT REFERENCES Lib_ViTriKho(VTId), -- Vị trí kho đệm nếu có
+    DHId BIGINT,
+    MaHang VARCHAR(100) NOT NULL, -- Mã hàng may mặc (Áo khoác, Sơ mi...)
+    LoaiGiamDinh VARCHAR(50) DEFAULT 'PhuLieu',
+    TrangThai VARCHAR(50) DEFAULT 'DAXACNHAN', -- Theo proc BGG: phải DAXACNHAN mới cho gán rọ
+    HangDangTrenXe INT DEFAULT 0, -- 1: Đang trên xe, 0: Đã vào kho kiểm
+    NguoiGiamDinh VARCHAR(100) DEFAULT 'QC User',
+    NgayGiamDinh TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    NgayNhanNL TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    GhiChu TEXT,
+    DanhSachPO VARCHAR(255)
 );
 
-CREATE INDEX IF NOT EXISTS idx_scan_logs_created_at ON scan_audit_logs(created_at DESC);
+-- 7. CHI TIẾT PHIẾU GIÁM ĐỊNH (WH_ChiTietPhieuGiamDinh)
+CREATE TABLE WH_ChiTietPhieuGiamDinh (
+    CTPGDId BIGINT PRIMARY KEY,
+    PGDId BIGINT NOT NULL REFERENCES WH_PhieuGiamDinh(PGDId) ON DELETE CASCADE,
+    VTId BIGINT NOT NULL REFERENCES Lib_NguyenPhuLieu(VTId),
+    SoPO VARCHAR(50),
+    PONo VARCHAR(50),
+    SLKiem NUMERIC(12, 2) NOT NULL DEFAULT 0, -- Số lượng mua / cần kiểm
+    SLDat NUMERIC(12, 2) NOT NULL DEFAULT 0,  -- Số lượng kiểm đạt
+    SLKDat NUMERIC(12, 2) NOT NULL DEFAULT 0, -- Số lượng không đạt
+    ChungTu VARCHAR(100),
+    Lot VARCHAR(100),
+    Kho VARCHAR(50),
+    GhiChu TEXT
+);
+
+-- 8. CHI TIẾT CÂY / CUỘN / BỊCH PHỤ LIỆU THỰC TẾ (WH_ChiTietPhieuGiamDinh_Cay)
+-- Đây là bảng lưu tem phụ liệu con (Child Barcode) theo chuẩn proc BGG
+CREATE TABLE WH_ChiTietPhieuGiamDinh_Cay (
+    CayId BIGSERIAL PRIMARY KEY,
+    MaCay VARCHAR(100) NOT NULL UNIQUE, -- Mã tem phụ liệu duy nhất (Child Barcode)
+    QrTrangMapping VARCHAR(100),
+    CTPGDId BIGINT NOT NULL REFERENCES WH_ChiTietPhieuGiamDinh(CTPGDId),
+    MaRo VARCHAR(50) REFERENCES Lib_RO(MaRo) ON DELETE SET NULL, -- Mã thùng/rọ chứa nó
+    SL NUMERIC(12, 2) NOT NULL DEFAULT 1.0, -- Số lượng phụ liệu trong gói này (VD: 1 cuộn, 100 cái)
+    SoLuongXuat NUMERIC(12, 2) DEFAULT 0.0, -- Số lượng đã xuất
+    SoMet NUMERIC(12, 2) DEFAULT 0.0,
+    SoYard NUMERIC(12, 2) DEFAULT 0.0,
+    NguoiCapNhatRo VARCHAR(100) DEFAULT 'PDA_USER',
+    NgayCapNhatRo TIMESTAMPTZ,
+    NgayQuet TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 9. BẢNG AUDIT LOG HỆ THỐNG (Mô phỏng eGMF_Log.Sys_Log)
+CREATE TABLE Sys_Log (
+    LogId BIGSERIAL PRIMARY KEY,
+    TypeLog VARCHAR(100) NOT NULL,
+    ContentLog TEXT NOT NULL,
+    UserName VARCHAR(100) DEFAULT 'PDA_USER',
+    DateLog TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+-- INDEXES TỐI ƯU HÓA
+CREATE INDEX idx_cay_macay ON WH_ChiTietPhieuGiamDinh_Cay(MaCay);
+CREATE INDEX idx_cay_maro ON WH_ChiTietPhieuGiamDinh_Cay(MaRo);
+CREATE INDEX idx_cay_ctpgdid ON WH_ChiTietPhieuGiamDinh_Cay(CTPGDId);
+CREATE INDEX idx_ro_maro ON Lib_RO(MaRo);
+CREATE INDEX idx_ro_vtid ON Lib_RO(VTId);
+CREATE INDEX idx_npl_item ON Lib_NguyenPhuLieu(Item);
 
 -- ==============================================================================
--- NẠP DỮ LIỆU MẪU (SEED DATA)
+-- DỮ LIỆU MẪU PRODUCTION BGG (SEED DATA)
 -- ==============================================================================
 
--- 1. Nạp Locations
-INSERT INTO locations (location_id, zone, rack, bin, description) VALUES
-('LOC-A1-01', 'Khu A', 'Kệ A1', 'Tầng 1', 'Kệ phụ liệu Chỉ & Mex'),
-('LOC-A1-02', 'Khu A', 'Kệ A1', 'Tầng 2', 'Kệ phụ liệu Chỉ & Mex'),
-('LOC-B2-01', 'Khu B', 'Kệ B2', 'Tầng 1', 'Kệ Cúc & Phụ liệu nhựa'),
-('LOC-B2-02', 'Khu B', 'Kệ B2', 'Tầng 2', 'Kệ Cúc & Khóa kéo'),
-('LOC-C3-01', 'Khu C', 'Kệ C3', 'Tầng 1', 'Kệ Nhãn mác & Chun dệt')
-ON CONFLICT (location_id) DO NOTHING;
+-- 1. Kho
+INSERT INTO Lib_DanhSachKho (KId, MaKho, TenKho) VALUES
+(1, 'KHO-NPL', 'Kho Nguyên Phụ Liệu BGG'),
+(2, 'KHO-VAI', 'Kho Vải BGG'),
+(3, 'TP', 'Kho Thành Phẩm'),
+(4, 'BTPC', 'Kho Bán Thành Phẩm Cắt');
 
--- 2. Nạp Phiếu Giám Định
-INSERT INTO inspection_orders (order_id, style_code, po_number, vendor_name, status) VALUES
-('QC-JACKET-01', 'AO-KHOAC-GIO-NAM-2026', 'PO-2026-001', 'Cty Phụ Liệu May Hà Nội', 'IN_PROGRESS'),
-('QC-SHIRT-02', 'SO-MI-OXFORD-SLIMFIT', 'PO-2026-002', 'Dệt May Phong Phú', 'IN_PROGRESS'),
-('QC-POLO-03', 'AO-POLO-SPORT-DRY', 'PO-2026-003', 'Cty Khóa Kéo YKK', 'PENDING')
-ON CONFLICT (order_id) DO NOTHING;
+-- 2. Khách hàng / NCC
+INSERT INTO Lib_KhachHang (KHId, MaKhachHang, TenDayDu, TenNgan) VALUES
+(101, 'NCC-HN', 'Công Ty TNHH Phụ Liệu May Hà Nội', 'Phụ Liệu HN'),
+(102, 'NCC-PP', 'Tổng Công Ty Dệt May Phong Phú', 'Phong Phú'),
+(103, 'NCC-YKK', 'Công Ty Khóa Kéo YKK Việt Nam', 'YKK VN');
 
--- 3. Nạp Chi Tiết Phiếu Giám Định
-INSERT INTO inspection_order_details (order_id, item_code, item_name, unit, planned_qty, received_qty) VALUES
-('QC-JACKET-01', 'CHI-DEN-40', 'Chỉ may Polyester Đen 40/2', 'Cuộn', 10.00, 2.00),
-('QC-JACKET-01', 'KHOA-DONG-15CM', 'Khóa kéo đồng 15cm YKK', 'Bịch (50 cái)', 5.00, 1.00),
-('QC-JACKET-01', 'NHAN-EP-SIZE-L', 'Nhãn ép nhiệt phản quang Size L', 'Túi (100 cái)', 4.00, 0.00),
-('QC-SHIRT-02', 'CUC-4LO-TRANG', 'Cúc áo 4 lỗ trắng xà cừ 11mm', 'Gói (144 cái)', 8.00, 1.00),
-('QC-SHIRT-02', 'CHI-TRANG-40', 'Chỉ may Spun Polyester Trắng 40/2', 'Cuộn', 12.00, 0.00),
-('QC-SHIRT-02', 'MEX-CO-AO', 'Mex keo dựng cổ áo sơ mi cao cấp', 'Cuộn (50m)', 3.00, 0.00),
-('QC-POLO-03', 'BO-CO-POLO-DEN', 'Bo cổ dệt Jacquard Đen', 'Bó (20 cái)', 6.00, 0.00),
-('QC-POLO-03', 'CHUN-LUNG-3CM', 'Chun dệt thoi co giãn 3cm', 'Cuộn (40m)', 5.00, 0.00)
-ON CONFLICT DO NOTHING;
+-- 3. Vị trí kệ kho
+INSERT INTO Lib_ViTriKho (VTId, TenViTri, KId, MoTa) VALUES
+(1001, 'LOC-A1-01', 1, 'Kệ A1 - Tầng 1 (Chỉ may & Mex)'),
+(1002, 'LOC-A1-02', 1, 'Kệ A1 - Tầng 2 (Chỉ may & Mex)'),
+(2001, 'LOC-B2-01', 1, 'Kệ B2 - Tầng 1 (Cúc áo & Phụ liệu nhựa)'),
+(2002, 'LOC-B2-02', 1, 'Kệ B2 - Tầng 2 (Khóa kéo đồng)'),
+(3001, 'LOC-C3-01', 1, 'Kệ C3 - Tầng 1 (Nhãn ép & Chun dệt)');
 
--- 4. Nạp Thùng Mẫu Đã Lên Kệ (TH-00098)
-INSERT INTO cartons (carton_id, location_id, status, total_items_count, closed_at, stored_at) VALUES
-('TH-00098', 'LOC-A1-01', 'STORED', 4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-ON CONFLICT (carton_id) DO NOTHING;
+-- 4. Danh mục NPL (Vật tư phụ liệu)
+INSERT INTO Lib_NguyenPhuLieu (VTId, Item, DienGiai, MaChungLoai, DVT, Size, MaMau, DHId) VALUES
+(501, 'CHI-DEN-40', 'Chỉ may Polyester Đen 40/2', 'CHI', 'Cuộn', '40/2', 'DEN', 202601),
+(502, 'KHOA-DONG-15CM', 'Khóa kéo đồng 15cm YKK', 'KHOA', 'Bịch (50 cái)', '15cm', 'DONG', 202601),
+(503, 'NHAN-EP-SIZE-L', 'Nhãn ép nhiệt phản quang Size L', 'NHAN', 'Túi (100 cái)', 'L', 'TRANG', 202601),
+(504, 'CUC-4LO-TRANG', 'Cúc áo 4 lỗ trắng xà cừ 11mm', 'CUC', 'Gói (144 cái)', '11mm', 'TRANG', 202602),
+(505, 'CHI-TRANG-40', 'Chỉ may Spun Polyester Trắng 40/2', 'CHI', 'Cuộn', '40/2', 'TRANG', 202602),
+(506, 'MEX-CO-AO', 'Mex keo dựng cổ áo sơ mi cao cấp', 'MEX', 'Cuộn (50m)', '50m', 'TRANG', 202602),
+(507, 'BO-CO-POLO-DEN', 'Bo cổ dệt Jacquard Đen', 'BO_CO', 'Bó (20 cái)', 'Free', 'DEN', 202603),
+(508, 'CHUN-LUNG-3CM', 'Chun dệt thoi co giãn 3cm', 'CHUN', 'Cuộn (40m)', '3cm', 'TRANG', 202603);
 
--- 5. Nạp Phụ Liệu Trong Thùng TH-00098
-INSERT INTO carton_items (child_barcode, carton_id, order_id, style_code, item_code, item_name, qty, unit, location_id, quality_status) VALUES
-('ITEM-CHI-DEN-001', 'TH-00098', 'QC-JACKET-01', 'AO-KHOAC-GIO-NAM-2026', 'CHI-DEN-40', 'Chỉ may Polyester Đen 40/2', 1.00, 'Cuộn', 'LOC-A1-01', 'PASS'),
-('ITEM-CHI-DEN-002', 'TH-00098', 'QC-JACKET-01', 'AO-KHOAC-GIO-NAM-2026', 'CHI-DEN-40', 'Chỉ may Polyester Đen 40/2', 1.00, 'Cuộn', 'LOC-A1-01', 'PASS'),
-('ITEM-KHOA-DONG-001', 'TH-00098', 'QC-JACKET-01', 'AO-KHOAC-GIO-NAM-2026', 'KHOA-DONG-15CM', 'Khóa kéo đồng 15cm YKK', 1.00, 'Bịch (50 cái)', 'LOC-A1-01', 'PASS'),
-('ITEM-CUC-TRANG-001', 'TH-00098', 'QC-SHIRT-02', 'SO-MI-OXFORD-SLIMFIT', 'CUC-4LO-TRANG', 'Cúc áo 4 lỗ trắng xà cừ 11mm', 1.00, 'Gói (144 cái)', 'LOC-A1-01', 'PASS')
-ON CONFLICT (child_barcode) DO NOTHING;
+-- 5. Phiếu giám định master (Trạng thái DAXACNHAN chuẩn proc BGG)
+INSERT INTO WH_PhieuGiamDinh (PGDId, MaPhieu, KHId, KId, MaHang, TrangThai, HangDangTrenXe, DanhSachPO) VALUES
+(10001, 'PGD-JACKET-2026-01', 101, 1, 'AO-KHOAC-GIO-NAM-2026', 'DAXACNHAN', 0, 'PO-JACKET-01'),
+(10002, 'PGD-SHIRT-2026-02', 102, 1, 'SO-MI-OXFORD-SLIMFIT', 'DAXACNHAN', 0, 'PO-SHIRT-02'),
+(10003, 'PGD-POLO-2026-03', 103, 1, 'AO-POLO-SPORT-DRY', 'DAXACNHAN', 0, 'PO-POLO-03');
+
+-- 6. Chi tiết phiếu giám định
+INSERT INTO WH_ChiTietPhieuGiamDinh (CTPGDId, PGDId, VTId, SoPO, PONo, SLKiem, SLDat, SLKDat, Lot) VALUES
+(20001, 10001, 501, 'PO-JACKET-01', 'PO-JK-01', 10.0, 2.0, 0, 'LOT-CHI-01'),
+(20002, 10001, 502, 'PO-JACKET-01', 'PO-JK-01', 5.0, 1.0, 0, 'LOT-KHOA-01'),
+(20003, 10001, 503, 'PO-JACKET-01', 'PO-JK-01', 4.0, 0.0, 0, 'LOT-NHAN-01'),
+(20004, 10002, 504, 'PO-SHIRT-02', 'PO-SM-02', 8.0, 1.0, 0, 'LOT-CUC-01'),
+(20005, 10002, 505, 'PO-SHIRT-02', 'PO-SM-02', 12.0, 0.0, 0, 'LOT-CHI-02'),
+(20006, 10002, 506, 'PO-SHIRT-02', 'PO-SM-02', 3.0, 0.0, 0, 'LOT-MEX-01'),
+(20007, 10003, 507, 'PO-POLO-03', 'PO-PL-03', 6.0, 0.0, 0, 'LOT-BO-01'),
+(20008, 10003, 508, 'PO-POLO-03', 'PO-PL-03', 5.0, 0.0, 0, 'LOT-CHUN-01');
+
+-- 7. Rọ mẫu đã có trong kho
+INSERT INTO Lib_RO (MaRo, VTId, TenViTri, KId, TrangThaiRo, TongSoCay, NgayDongThung) VALUES
+('TH-00098', 1001, 'LOC-A1-01', 1, 'STORED', 4, CURRENT_TIMESTAMP);
+
+-- 8. Chi tiết các cây / gói phụ liệu trong rọ mẫu TH-00098
+INSERT INTO WH_ChiTietPhieuGiamDinh_Cay (MaCay, CTPGDId, MaRo, SL, SoLuongXuat) VALUES
+('ITEM-CHI-DEN-001', 20001, 'TH-00098', 1.0, 0.0),
+('ITEM-CHI-DEN-002', 20001, 'TH-00098', 1.0, 0.0),
+('ITEM-KHOA-DONG-001', 20002, 'TH-00098', 1.0, 0.0),
+('ITEM-CUC-TRANG-001', 20004, 'TH-00098', 1.0, 0.0);
